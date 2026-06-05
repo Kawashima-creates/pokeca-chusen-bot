@@ -7,3 +7,6 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# ローカル常駐Botのログ
+*.log
