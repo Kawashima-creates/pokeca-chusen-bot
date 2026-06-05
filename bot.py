@@ -10,6 +10,7 @@ GitHub Actions の通知Botとは別プロセス。常時稼働ホスト（Railw
 from __future__ import annotations
 
 import asyncio
+import datetime
 import os
 
 import discord
@@ -17,11 +18,50 @@ from discord import app_commands
 
 import notifier
 import sources
+import store
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 GUILD_ID = os.environ.get("GUILD_ID", "").strip()
 
 intents = discord.Intents.default()  # メッセージ内容インテントは不要（スラッシュコマンドのみ）
+
+
+# ---- 申込ボタン（Bot再起動後も動くよう DynamicItem を使用）----
+class ApplyButton(
+    discord.ui.DynamicItem[discord.ui.Button],
+    template=r"apply:(?P<uid>[0-9a-f]{6,})",
+):
+    def __init__(self, uid: str, applied: bool) -> None:
+        self.uid = uid
+        super().__init__(
+            discord.ui.Button(
+                label="✅ 申込済（取消）" if applied else "申し込んだ",
+                style=discord.ButtonStyle.secondary if applied else discord.ButtonStyle.success,
+                custom_id=f"apply:{uid}",
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):  # type: ignore[override]
+        uid = match["uid"]
+        return cls(uid, store.is_applied(uid))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        emb = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
+        base_title = (emb.title or "").removeprefix("✅ ")
+        product = (emb.description or "").strip("*")
+        end = next((f.value.strip("*") for f in emb.fields if f.name == "締切"), "")
+        at = datetime.datetime.now(sources.JST).isoformat(timespec="minutes")
+
+        applied = store.toggle(self.uid, base_title, product, end, at)
+        emb.title = ("✅ " + base_title) if applied else base_title
+        await interaction.response.edit_message(embed=emb, view=apply_view(self.uid, applied))
+
+
+def apply_view(uid: str, applied: bool) -> discord.ui.View:
+    view = discord.ui.View(timeout=None)
+    view.add_item(ApplyButton(uid, applied))
+    return view
 
 
 class PokecaBot(discord.Client):
@@ -30,6 +70,8 @@ class PokecaBot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self) -> None:
+        # 申込ボタンを再起動後も動くよう登録
+        self.add_dynamic_items(ApplyButton)
         # GUILD_ID があればそのサーバーへ即同期（グローバル同期は反映に最大1時間かかる）
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
@@ -62,13 +104,41 @@ async def list_cmd(interaction: discord.Interaction) -> None:
     order = {"受付中": 0, "近日開始": 1, "会員限定": 2}
     lots.sort(key=lambda x: order.get(x.section, 9))
 
-    # Discordは1メッセージにつき最大10 embed
-    embeds = [discord.Embed.from_dict(notifier.lottery_embed(l)) for l in lots[:10]]
-    extra = len(lots) - len(embeds)
-    content = f"🎴 開催中の抽選 **{len(lots)}件**"
+    shown = lots[:10]  # 申込ボタンを個別に付けるため1抽選=1メッセージ
+    extra = len(lots) - len(shown)
+    head = f"🎴 開催中の抽選 **{len(lots)}件**"
     if extra > 0:
-        content += f"（先頭{len(embeds)}件を表示）"
-    await interaction.followup.send(content=content, embeds=embeds)
+        head += f"（先頭{len(shown)}件を表示）"
+    await interaction.followup.send(content=head)
+
+    for lot in shown:
+        applied = store.is_applied(lot.uid)
+        data = notifier.lottery_embed(lot)
+        if applied:
+            data["title"] = "✅ " + data["title"]
+        emb = discord.Embed.from_dict(data)
+        await interaction.followup.send(embed=emb, view=apply_view(lot.uid, applied))
+
+
+@client.tree.command(name="applied", description="申し込み済みの抽選を一覧表示します")
+async def applied_cmd(interaction: discord.Interaction) -> None:
+    data = store.list_applied()
+    if not data:
+        await interaction.response.send_message(
+            "まだ申込済みの抽選はありません。`/list` から「申し込んだ」を押すと記録されます。",
+            ephemeral=True,
+        )
+        return
+    lines = []
+    for v in data.values():
+        title = v.get("label", "?")
+        prod = v.get("product", "")
+        end = v.get("end") or "-"
+        lines.append(f"✅ {title} … {prod}（締切: {end}）")
+    await interaction.response.send_message(
+        f"**申込済みの抽選（{len(lines)}件）**\n" + "\n".join(lines),
+        ephemeral=True,
+    )
 
 
 def main() -> None:

@@ -10,3 +10,6 @@ venv/
 
 # ローカル常駐Botのログ
 *.log
+
+# 申込状態（ローカル）
+applied.json
