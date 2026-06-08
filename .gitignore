@@ -16,3 +16,7 @@ applied.json
 
 # 当選メールチェックの状態（CIが-fで永続化）
 mail_state.json
+
+# Bot死活監視ファイル
+bot_heartbeat
+watchdog.log

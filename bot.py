@@ -12,14 +12,19 @@ from __future__ import annotations
 import asyncio
 import datetime
 import os
+import time
+from pathlib import Path
 
 import discord
 from discord import app_commands
+from discord.ext import tasks
 
 import notifier
 import prices
 import sources
 import store
+
+HEARTBEAT_PATH = Path(__file__).with_name("bot_heartbeat")
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 GUILD_ID = os.environ.get("GUILD_ID", "").strip()
@@ -87,9 +92,19 @@ class PokecaBot(discord.Client):
 client = PokecaBot()
 
 
+@tasks.loop(seconds=60)
+async def heartbeat() -> None:
+    # 接続が健全なときだけ更新。固まる/切断時は更新が止まりウォッチドッグが再起動する
+    if client.is_ready():
+        HEARTBEAT_PATH.write_text(str(int(time.time())))
+
+
 @client.event
 async def on_ready() -> None:
     print(f"[bot] ログイン成功: {client.user}")
+    HEARTBEAT_PATH.write_text(str(int(time.time())))
+    if not heartbeat.is_running():
+        heartbeat.start()
 
 
 @client.tree.command(name="list", description="開催中のポケカ抽選を一覧表示します")
